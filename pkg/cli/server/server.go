@@ -55,6 +55,7 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	}
 
 	serverConfig := server.Config{}
+	serverConfig.DisableAgent = cfg.DisableAgent
 	serverConfig.ControlConfig.ClusterSecret = cfg.ClusterSecret
 	serverConfig.ControlConfig.DataDir = cfg.DataDir
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
@@ -85,6 +86,9 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	serverConfig.ControlConfig.AdvertisePort = cfg.AdvertisePort
 	serverConfig.ControlConfig.BootstrapReadOnly = !cfg.StoreBootstrap
 	serverConfig.ControlConfig.FlannelBackend = cfg.FlannelBackend
+	serverConfig.ControlConfig.ExtraCloudControllerArgs = cfg.ExtraCloudControllerArgs
+	serverConfig.ControlConfig.DisableCCM = cfg.DisableCCM
+	serverConfig.ControlConfig.DisableNPC = cfg.DisableNPC
 
 	if cmds.AgentConfig.FlannelIface != "" && cmds.AgentConfig.NodeIP == "" {
 		cmds.AgentConfig.NodeIP = netutil.GetIPFromInterface(cmds.AgentConfig.FlannelIface)
@@ -132,7 +136,14 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 		serverConfig.ControlConfig.DefaultLocalStoragePath = cfg.DefaultLocalStoragePath
 	}
 
+	noDeploys := make([]string, 0)
 	for _, noDeploy := range app.StringSlice("no-deploy") {
+		for _, splitNoDeploy := range strings.Split(noDeploy, ",") {
+			noDeploys = append(noDeploys, splitNoDeploy)
+		}
+	}
+
+	for _, noDeploy := range noDeploys {
 		if noDeploy == "servicelb" {
 			serverConfig.DisableServiceLB = true
 			continue
@@ -177,6 +188,11 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	agentConfig.ServerURL = url
 	agentConfig.Token = token
 	agentConfig.DisableLoadBalancer = true
+	agentConfig.Rootless = cfg.Rootless
+	if agentConfig.Rootless {
+		// let agent specify Rootless kubelet flags, but not unshare twice
+		agentConfig.RootlessAlreadyUnshared = true
+	}
 
 	return agent.Run(ctx, agentConfig)
 }

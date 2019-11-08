@@ -133,6 +133,18 @@ func kubelet(cfg *config.Agent) {
 	if len(cfg.NodeTaints) > 0 {
 		argsMap["register-with-taints"] = strings.Join(cfg.NodeTaints, ",")
 	}
+	if !cfg.DisableCCM {
+		argsMap["cloud-provider"] = "external"
+	}
+
+	if cfg.Rootless {
+		// flags are from https://github.com/rootless-containers/usernetes/blob/v20190826.0/boot/kubelet.sh
+		argsMap["cgroup-driver"] = "none"
+		argsMap["feature-gates=SupportNoneCgroupDriver"] = "true"
+		argsMap["cgroups-per-qos"] = "false"
+		argsMap["enforce-node-allocatable"] = ""
+	}
+
 	args := config.GetArgsList(argsMap, cfg.ExtraKubeletArgs)
 	command.SetArgs(args)
 

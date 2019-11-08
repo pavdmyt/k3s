@@ -6,9 +6,9 @@ Author: https://github.com/itwars
 
 Build a Kubernetes cluster using Ansible with k3s. The goal is easily install a Kubernetes cluster on machines running:
 
-- [X] Debian
-- [ ] Ubuntu
-- [ ] CentOS
+ [X] Debian 
+- [ ] Ubuntu 
+- [X] CentOS 
 
 on processor architecture:
 

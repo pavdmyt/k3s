@@ -8,13 +8,17 @@ PKG="github.com/rancher/k3s"
 PKG_CONTAINERD="github.com/containerd/containerd"
 PKG_RANCHER_CONTAINERD="github.com/rancher/containerd"
 PKG_CRICTL="github.com/kubernetes-sigs/cri-tools"
+VENDOR_PREFIX=
+if [ -z "$(go mod why 2>/dev/null)" ]; then
+    VENDOR_PREFIX="${PKG}/vendor/"
+fi
 
 VERSIONFLAGS="
-    -X $PKG/pkg/version.Version=$VERSION
-    -X $PKG/pkg/version.GitCommit=${COMMIT:0:8}
-    -X $PKG_CONTAINERD/version.Version=$VERSION_CONTAINERD
-    -X $PKG_CONTAINERD/version.Package=$PKG_RANCHER_CONTAINERD
-    -X $PKG_CRICTL/pkg/version.Version=$VERSION_CRICTL"
+    -X ${PKG}/pkg/version.Version=${VERSION}
+    -X ${PKG}/pkg/version.GitCommit=${COMMIT:0:8}
+    -X ${VENDOR_PREFIX}${PKG_CONTAINERD}/version.Version=${VERSION_CONTAINERD}
+    -X ${VENDOR_PREFIX}${PKG_CONTAINERD}/version.Package=${PKG_RANCHER_CONTAINERD}
+    -X ${VENDOR_PREFIX}${PKG_CRICTL}/pkg/version.Version=${VERSION_CRICTL}"
 LDFLAGS="
     -w -s"
 STATIC="
@@ -48,6 +52,7 @@ rm -f \
     bin/runc \
     bin/containerd-shim \
     bin/containerd-shim-runc-v1 \
+    bin/containerd-shim-runc-v2 \
     bin/k3s-server \
     bin/kubectl \
     bin/crictl \
@@ -87,6 +92,11 @@ CGO_ENABLED=1 go build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC_SQ
 echo Building runc
 make EXTRA_LDFLAGS="-w -s" BUILDTAGS="apparmor seccomp" -C ./vendor/github.com/opencontainers/runc static
 cp -f ./vendor/github.com/opencontainers/runc/runc ./bin/runc
-echo Building containerd-shim-runc-v1
-make -C ./vendor/github.com/containerd/containerd bin/containerd-shim-runc-v1
-cp -f ./vendor/github.com/containerd/containerd/bin/containerd-shim-runc-v1 ./bin/containerd-shim-runc-v1
+
+echo Building containerd-shim
+make -C ./vendor/github.com/containerd/containerd bin/containerd-shim
+cp -f ./vendor/github.com/containerd/containerd/bin/containerd-shim ./bin/containerd-shim
+
+echo Building containerd-shim-runc-v2
+make -C ./vendor/github.com/containerd/containerd bin/containerd-shim-runc-v2
+cp -f ./vendor/github.com/containerd/containerd/bin/containerd-shim-runc-v2 ./bin/containerd-shim-runc-v2

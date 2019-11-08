@@ -7,8 +7,8 @@ set -e
 #   ENV_VAR=... ./install.sh
 #
 # Example:
-#   Installing a server without an agent:
-#     curl ... | INSTALL_K3S_EXEC="--disable-agent" sh -
+#   Installing a server without traefik:
+#     curl ... | INSTALL_K3S_EXEC="--no-deploy=traefik" sh -
 #   Installing an agent to point at a server:
 #     curl ... | K3S_TOKEN=xxx K3S_URL=https://server-url:6443 sh -
 #
@@ -52,11 +52,11 @@ set -e
 #     of EXEC and script args ($@).
 #
 #     The following commands result in the same behavior:
-#       curl ... | INSTALL_K3S_EXEC="--disable-agent" sh -s -
-#       curl ... | INSTALL_K3S_EXEC="server --disable-agent" sh -s -
-#       curl ... | INSTALL_K3S_EXEC="server" sh -s - --disable-agent
-#       curl ... | sh -s - server --disable-agent
-#       curl ... | sh -s - --disable-agent
+#       curl ... | INSTALL_K3S_EXEC="--no-deploy=traefik" sh -s -
+#       curl ... | INSTALL_K3S_EXEC="server --no-deploy=traefik" sh -s -
+#       curl ... | INSTALL_K3S_EXEC="server" sh -s - --no-deploy=traefik
+#       curl ... | sh -s - server --no-deploy=traefik
+#       curl ... | sh -s - --no-deploy=traefik
 #
 #   - INSTALL_K3S_NAME
 #     Name of systemd service to create, will default from the k3s exec command
@@ -437,12 +437,13 @@ create_killall() {
     info "Creating killall script ${BIN_DIR}/${KILLALL_K3S_SH}"
     $SUDO tee ${BIN_DIR}/${KILLALL_K3S_SH} >/dev/null << \EOF
 #!/bin/sh
-set -x
 [ $(id -u) -eq 0 ] || exec sudo $0 $@
 
 for bin in /var/lib/rancher/k3s/data/**/bin/; do
     [ -d $bin ] && export PATH=$bin:$PATH
 done
+
+set -x
 
 for service in /etc/systemd/system/k3s*.service; do
     [ -s $service ] && systemctl stop $(basename $service)
@@ -452,44 +453,65 @@ for service in /etc/init.d/k3s*; do
     [ -x $service ] && $service stop
 done
 
+pschildren() {
+    ps -e -o ppid= -o pid= | \
+    sed -e 's/^\s*//g; s/\s\s*/\t/g;' | \
+    grep -w "^$1" | \
+    cut -f2
+}
+
 pstree() {
     for pid in $@; do
         echo $pid
-        # Find and show pstree for child processes of $pid
-        ps -o ppid= -o pid= | while read parent child; do
-            [ $parent -ne $pid ] || pstree $child
+        for child in $(pschildren $pid); do
+            pstree $child
         done
     done
 }
 
 killtree() {
-    [ $# -ne 0 ] && kill $(set +x; pstree $@; set -x)
+    kill -9 $(
+        { set +x; } 2>/dev/null;
+        pstree $@;
+        set -x;
+    ) 2>/dev/null
 }
 
-killtree $(lsof | sed -e 's/^[^0-9]*//g; s/  */\t/g' | grep -w 'k3s/data/[^/]*/bin/containerd-shim' | cut -f1 | sort -n -u)
+getshims() {
+    lsof | sed -e 's/^[^0-9]*//g; s/  */\t/g' | grep -w 'k3s/data/[^/]*/bin/containerd-shim' | cut -f1 | sort -n -u
+}
+
+killtree $({ set +x; } 2>/dev/null; getshims; set -x)
 
 do_unmount() {
+    { set +x; } 2>/dev/null
     MOUNTS=
     while read ignore mount ignore; do
         MOUNTS="$mount\n$MOUNTS"
     done </proc/self/mounts
     MOUNTS=$(printf $MOUNTS | grep "^$1" | sort -r)
     if [ -n "${MOUNTS}" ]; then
+        set -x
         umount ${MOUNTS}
+    else
+        set -x
     fi
 }
 
 do_unmount '/run/k3s'
 do_unmount '/var/lib/rancher/k3s'
+do_unmount '/var/lib/kubelet/pods'
+do_unmount '/run/netns/cni-'
 
 # Delete network interface(s) that match 'master cni0'
-ip link show | grep 'master cni0' | while read ignore iface ignore; do
+ip link show 2>/dev/null | grep 'master cni0' | while read ignore iface ignore; do
     iface=${iface%%@*}
     [ -z "$iface" ] || ip link delete $iface
 done
 ip link delete cni0
 ip link delete flannel.1
 rm -rf /var/lib/cni/
+iptables-save | grep -v KUBE- | grep -v CNI- | iptables-restore
 EOF
     $SUDO chmod 755 ${BIN_DIR}/${KILLALL_K3S_SH}
     $SUDO chown root:root ${BIN_DIR}/${KILLALL_K3S_SH}
@@ -536,6 +558,7 @@ done
 
 rm -rf /etc/rancher/k3s
 rm -rf /var/lib/rancher/k3s
+rm -rf /var/lib/kubelet
 rm -f ${BIN_DIR}/k3s
 rm -f ${BIN_DIR}/${KILLALL_K3S_SH}
 EOF
@@ -556,6 +579,7 @@ create_env_file() {
     UMASK=$(umask)
     umask 0377
     env | grep '^K3S_' | $SUDO tee ${FILE_K3S_ENV} >/dev/null
+    env | egrep -i '^(NO|HTTP|HTTPS)_PROXY' | $SUDO tee -a ${FILE_K3S_ENV} >/dev/null
     umask $UMASK
 }
 
@@ -566,16 +590,14 @@ create_systemd_service_file() {
 [Unit]
 Description=Lightweight Kubernetes
 Documentation=https://k3s.io
-After=network-online.target
+Wants=network-online.target
+
+[Install]
+WantedBy=multi-user.target
 
 [Service]
 Type=${SYSTEMD_TYPE}
 EnvironmentFile=${FILE_K3S_ENV}
-ExecStartPre=-/sbin/modprobe br_netfilter
-ExecStartPre=-/sbin/modprobe overlay
-ExecStart=${BIN_DIR}/k3s \\
-    ${CMD_K3S_EXEC}
-
 KillMode=process
 Delegate=yes
 LimitNOFILE=infinity
@@ -585,9 +607,11 @@ TasksMax=infinity
 TimeoutStartSec=0
 Restart=always
 RestartSec=5s
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=${BIN_DIR}/k3s \\
+    ${CMD_K3S_EXEC}
 
-[Install]
-WantedBy=multi-user.target
 EOF
 }
 

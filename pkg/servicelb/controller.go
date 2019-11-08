@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	image              = "rancher/klipper-lb:v0.1.1"
+	image              = "rancher/klipper-lb:v0.1.2"
 	svcNameLabel       = "svccontroller.k3s.cattle.io/svcname"
 	daemonsetNodeLabel = "svccontroller.k3s.cattle.io/enablelb"
 	nodeSelectorLabel  = "svccontroller.k3s.cattle.io/nodeselector"
@@ -221,8 +221,15 @@ func (h *handler) podIPs(pods []*core.Pod) ([]string, error) {
 		}
 
 		for _, addr := range node.Status.Addresses {
-			if addr.Type == core.NodeInternalIP {
+			if addr.Type == core.NodeExternalIP {
 				ips[addr.Address] = true
+			}
+		}
+		if len(ips) == 0 {
+			for _, addr := range node.Status.Addresses {
+				if addr.Type == core.NodeInternalIP {
+					ips[addr.Address] = true
+				}
 			}
 		}
 	}
