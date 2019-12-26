@@ -7,7 +7,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/Rican7/retry/backoff"
+	"github.com/Rican7/retry/strategy"
 	"github.com/sirupsen/logrus"
 )
 
@@ -57,7 +61,13 @@ func (s Stripped) String() string {
 	return regexp.MustCompile("[\t ]+").ReplaceAllString(str, " ")
 }
 
+type ErrRetry func(error) bool
+type TranslateErr func(error) error
+
 type Generic struct {
+	sync.Mutex
+
+	LockWrites            bool
 	LastInsertID          bool
 	DB                    *sql.DB
 	GetCurrentSQL         string
@@ -70,7 +80,10 @@ type Generic struct {
 	DeleteSQL             string
 	UpdateCompactSQL      string
 	InsertSQL             string
+	FillSQL               string
 	InsertLastInsertIDSQL string
+	Retry                 ErrRetry
+	TranslateErr          TranslateErr
 }
 
 func q(sql, param string, numbered bool) string {
@@ -162,6 +175,9 @@ func Open(driverName, dataSourceName string, paramCharacter string, numbered boo
 
 		InsertSQL: q(`INSERT INTO kine(name, created, deleted, create_revision, prev_revision, lease, value, old_value)
 			values(?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`, paramCharacter, numbered),
+
+		FillSQL: q(`INSERT INTO kine(id, name, created, deleted, create_revision, prev_revision, lease, value, old_value)
+			values(?, ?, ?, ?, ?, ?, ?, ?, ?)`, paramCharacter, numbered),
 	}, nil
 }
 
@@ -175,9 +191,27 @@ func (d *Generic) queryRow(ctx context.Context, sql string, args ...interface{})
 	return d.DB.QueryRowContext(ctx, sql, args...)
 }
 
-func (d *Generic) execute(ctx context.Context, sql string, args ...interface{}) (sql.Result, error) {
-	logrus.Tracef("EXEC %v : %s", args, Stripped(sql))
-	return d.DB.ExecContext(ctx, sql, args...)
+func (d *Generic) execute(ctx context.Context, sql string, args ...interface{}) (result sql.Result, err error) {
+	if d.LockWrites {
+		d.Lock()
+		defer d.Unlock()
+	}
+
+	wait := strategy.Backoff(backoff.Linear(100 + time.Millisecond))
+	for i := uint(0); i < 20; i++ {
+		if i > 2 {
+			logrus.Debugf("EXEC (try: %d) %v : %s", i, args, Stripped(sql))
+		} else {
+			logrus.Tracef("EXEC (try: %d) %v : %s", i, args, Stripped(sql))
+		}
+		result, err = d.DB.ExecContext(ctx, sql, args...)
+		if err != nil && d.Retry != nil && d.Retry(err) {
+			wait(i)
+			continue
+		}
+		return result, err
+	}
+	return
 }
 
 func (d *Generic) GetCompactRevision(ctx context.Context) (int64, error) {
@@ -260,12 +294,32 @@ func (d *Generic) CurrentRevision(ctx context.Context) (int64, error) {
 	return id, err
 }
 
-func (d *Generic) After(ctx context.Context, prefix string, rev int64) (*sql.Rows, error) {
+func (d *Generic) After(ctx context.Context, prefix string, rev, limit int64) (*sql.Rows, error) {
 	sql := d.AfterSQL
+	if limit > 0 {
+		sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
+	}
 	return d.query(ctx, sql, prefix, rev)
 }
 
+func (d *Generic) Fill(ctx context.Context, revision int64) error {
+	_, err := d.execute(ctx, d.FillSQL, revision, fmt.Sprintf("gap-%d", revision), 0, 1, 0, 0, 0, nil, nil)
+	return err
+}
+
+func (d *Generic) IsFill(key string) bool {
+	return strings.HasPrefix(key, "gap-")
+}
+
 func (d *Generic) Insert(ctx context.Context, key string, create, delete bool, createRevision, previousRevision int64, ttl int64, value, prevValue []byte) (id int64, err error) {
+	if d.TranslateErr != nil {
+		defer func() {
+			if err != nil {
+				err = d.TranslateErr(err)
+			}
+		}()
+	}
+
 	cVal := 0
 	dVal := 0
 	if create {
@@ -278,7 +332,7 @@ func (d *Generic) Insert(ctx context.Context, key string, create, delete bool, c
 	if d.LastInsertID {
 		row, err := d.execute(ctx, d.InsertLastInsertIDSQL, key, cVal, dVal, createRevision, previousRevision, ttl, value, prevValue)
 		if err != nil {
-			return 00, err
+			return 0, err
 		}
 		return row.LastInsertId()
 	}
